@@ -21,11 +21,31 @@ type mockCF struct {
 	patches   int
 	lists     int
 	failPatch bool
+
+	// für den Reihenfolge-Test: künstliche Verzögerung und gleichzeitig offene Anfragen
+	delay    time.Duration
+	offen    int
+	maxOffen int
+	zmu      sync.Mutex
 }
 
 const info = `"result_info":{"page":1,"per_page":100,"count":1,"total_count":1,"total_pages":1}`
 
 func (m *mockCF) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	m.zmu.Lock()
+	m.offen++
+	if m.offen > m.maxOffen {
+		m.maxOffen = m.offen
+	}
+	d := m.delay
+	m.zmu.Unlock()
+	defer func() {
+		m.zmu.Lock()
+		m.offen--
+		m.zmu.Unlock()
+	}()
+	time.Sleep(d)
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
@@ -235,5 +255,65 @@ func TestApply(t *testing.T) {
 	m.setze("192.0.2.1", true)
 	if ok, timedOut := u.Apply(&addr, 10*time.Second); ok || timedOut {
 		t.Fatalf("Apply bei Cloudflare-Fehler: ok=%v timedOut=%v", ok, timedOut)
+	}
+}
+
+// TestReihenfolge: Push und Nachprüfung laufen nie gleichzeitig. Ein Push mitten in eine laufende Nachprüfung wartet,
+// wird danach erfolgreich abgeglichen, und am Ende steht die neue IP – die Nachprüfung schreibt nie eine ältere zurück.
+func TestReihenfolge(t *testing.T) {
+	m := &mockCF{content: "192.0.2.10"}
+	srv := httptest.NewServer(m)
+	defer srv.Close()
+
+	api, err := cf.NewWithAPIToken("test", cf.BaseURL(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := NewUpdater(slog.Default(), "test_reihenfolge")
+	// zwei Namen, damit ein Durchlauf mehrere Anfragen braucht
+	u.SetIPv4Zones("home.example.com,home.example.com")
+	u.SetRecheckInterval(30 * time.Millisecond)
+	if err, _ := u.init(api); err != nil {
+		t.Fatal(err)
+	}
+	u.StartWorker()
+
+	alt := net.ParseIP("198.51.100.7")
+	if ok, _ := u.Apply(&alt, 10*time.Second); !ok {
+		t.Fatal("erster Push gescheitert")
+	}
+
+	// ab jetzt langsam: jede Nachprüfung dauert spürbar
+	m.zmu.Lock()
+	m.delay = 40 * time.Millisecond
+	m.zmu.Unlock()
+
+	// warten, bis eine Nachprüfung läuft (Lese-Anfragen steigen ohne Push)
+	m.mu.Lock()
+	start := m.lists
+	m.mu.Unlock()
+	warte(t, "Nachprüfung läuft", func() bool { m.mu.Lock(); defer m.mu.Unlock(); return m.lists > start })
+
+	// Push mit neuer IP mitten hinein
+	neu := net.ParseIP("203.0.113.5")
+	ok, timedOut := u.Apply(&neu, 10*time.Second)
+	if !ok || timedOut {
+		t.Fatalf("Push während Nachprüfung: ok=%v timedOut=%v", ok, timedOut)
+	}
+	if c, _ := m.stand(); c != "203.0.113.5" {
+		t.Fatalf("nach Push: %s, erwartet die neue IP", c)
+	}
+
+	// weitere Nachprüfungen laufen lassen: die neue IP bleibt
+	time.Sleep(300 * time.Millisecond)
+	if c, _ := m.stand(); c != "203.0.113.5" {
+		t.Fatalf("Nachprüfung hat überschrieben: %s", c)
+	}
+
+	m.zmu.Lock()
+	maxOffen := m.maxOffen
+	m.zmu.Unlock()
+	if maxOffen != 1 {
+		t.Fatalf("gleichzeitig offene Cloudflare-Anfragen: %d, erwartet 1 (alles nacheinander)", maxOffen)
 	}
 }
