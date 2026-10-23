@@ -121,23 +121,23 @@ jobs:
         run: |
           set -eu
           code() { curl -s -o /dev/null -w '%{http_code}' "$1"; }
-          docker run -d --name t -u 2008:2008 --read-only --cap-drop ALL --security-opt no-new-privileges \
+          docker run -d --name dyndns-probe -u 2008:2008 --read-only --cap-drop ALL --security-opt no-new-privileges \
             -e DYNDNS_SERVER_BIND=:8080 -e DYNDNS_SERVER_USERNAME=fritzbox -e DYNDNS_SERVER_PASSWORD=probe \
             -e FRITZBOX_ENDPOINT_URL= -e METRICS_BIND=:9876 -p 18080:8080 -p 19876:9876 dyndns:test
           sleep 3
-          docker logs t
-          test "$(docker inspect -f '{{.State.Running}}' t)" = true
+          docker logs dyndns-probe
+          test "$(docker inspect -f '{{.State.Running}}' dyndns-probe)" = true
           test "$(code http://127.0.0.1:19876/liveness)" = 204
           test "$(code 'http://127.0.0.1:18080/ip?v4=192.0.2.1&username=fritzbox&password=falsch')" = 401
           test "$(code http://127.0.0.1:19876/healthz)" = 503
-          if docker exec t /app/fritzbox-cloudflare-dyndns healthcheck; then echo "healthcheck hätte scheitern müssen"; exit 1; fi
+          if docker exec dyndns-probe /app/fritzbox-cloudflare-dyndns healthcheck; then echo "healthcheck hätte scheitern müssen"; exit 1; fi
           test "$(code 'http://127.0.0.1:18080/ip?v4=192.0.2.1&username=fritzbox&password=probe')" = 202
           test "$(code http://127.0.0.1:19876/healthz)" = 200
-          docker exec t /app/fritzbox-cloudflare-dyndns healthcheck
+          docker exec dyndns-probe /app/fritzbox-cloudflare-dyndns healthcheck
           case "$(docker image inspect -f '{{.Config.User}}' dyndns:test)" in 65532|65532:65532|nonroot|nonroot:nonroot) ;; *) echo "Image läuft nicht als nonroot"; exit 1;; esac
           test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' dyndns:test)" = "${{ steps.key.outputs.version }}"
-          if docker exec t /busybox/sh -c true 2>/dev/null; then echo "Shell im Image"; exit 1; fi
-          docker rm -f t
+          if docker exec dyndns-probe /busybox/sh -c true 2>/dev/null; then echo "Shell im Image"; exit 1; fi
+          docker rm -f dyndns-probe
 
       - name: Anmelden bei ghcr.io
         if: steps.neu.outputs.bauen == 'true'
