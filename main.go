@@ -51,7 +51,7 @@ func main() {
 
 	bind := os.Getenv("METRICS_BIND")
 	pollStatus := polling.StartPollServer(updater.In, &localIp, rootLogger)
-	pushStatus := startPushServer(updater.In, &localIp, rootLogger, cancel)
+	pushStatus := startPushServer(updater, &localIp, rootLogger, cancel)
 	status := util.Status{
 		Push:    pushStatus,
 		Poll:    pollStatus,
@@ -141,7 +141,7 @@ func newUpdater(logger *slog.Logger) (*cloudflare.Updater, []*util.UpdateStatus)
 	return u, status
 }
 
-func startPushServer(out chan<- *net.IP, localIp *net.IP, logger *slog.Logger, cancel context.CancelCauseFunc) *util.PushStatus {
+func startPushServer(updater *cloudflare.Updater, localIp *net.IP, logger *slog.Logger, cancel context.CancelCauseFunc) *util.PushStatus {
 	const subsystem = "push_server"
 	logger = logger.With(util.SubsystemAttr(subsystem))
 	bind := os.Getenv("DYNDNS_SERVER_BIND")
@@ -155,7 +155,11 @@ func startPushServer(out chan<- *net.IP, localIp *net.IP, logger *slog.Logger, c
 		Succeeded: true,
 	}
 
-	server := dyndns.NewServer(out, localIp, logger, subsystem, &status)
+	server := dyndns.NewServer(updater.In, localIp, logger, subsystem, &status)
+	if updater.Enabled() {
+		// Antwort erst nach den Cloudflare-Updates (benji2k2-Fork); länger als 45 s wartet der Push nicht
+		server.Apply = func(ip *net.IP) (bool, bool) { return updater.Apply(ip, 45*time.Second) }
+	}
 	server.Username = os.Getenv("DYNDNS_SERVER_USERNAME")
 	server.Password = readSecret("DYNDNS_SERVER_PASSWORD")
 

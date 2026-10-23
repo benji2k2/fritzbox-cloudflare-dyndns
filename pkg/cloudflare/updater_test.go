@@ -202,3 +202,38 @@ func TestNachpruefung(t *testing.T) {
 		t.Fatalf("Nachprüfung schreibt ohne Abweichung: patches %d → %d", p, p2)
 	}
 }
+
+// TestApply: synchroner Abgleich für den Push-Server – true erst nach erfolgreichem Update, false bei Cloudflare-Fehler.
+func TestApply(t *testing.T) {
+	m := &mockCF{content: "192.0.2.10"}
+	srv := httptest.NewServer(m)
+	defer srv.Close()
+
+	api, err := cf.NewWithAPIToken("test", cf.BaseURL(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := NewUpdater(slog.Default(), "test_apply")
+	u.SetIPv4Zones("home.example.com")
+	if err, _ := u.init(api); err != nil {
+		t.Fatal(err)
+	}
+	if !u.Enabled() {
+		t.Fatal("Enabled() nach init false")
+	}
+	u.StartWorker()
+
+	addr := net.ParseIP("198.51.100.7")
+	if ok, timedOut := u.Apply(&addr, 10*time.Second); !ok || timedOut {
+		t.Fatalf("Apply: ok=%v timedOut=%v", ok, timedOut)
+	}
+	// Antwort kommt erst nach dem Update: der Eintrag ist zu diesem Zeitpunkt schon geändert
+	if c, p := m.stand(); c != "198.51.100.7" || p != 1 {
+		t.Fatalf("nach Apply: content=%s patches=%d", c, p)
+	}
+
+	m.setze("192.0.2.1", true)
+	if ok, timedOut := u.Apply(&addr, 10*time.Second); ok || timedOut {
+		t.Fatalf("Apply bei Cloudflare-Fehler: ok=%v timedOut=%v", ok, timedOut)
+	}
+}

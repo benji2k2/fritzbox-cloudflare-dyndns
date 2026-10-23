@@ -18,6 +18,11 @@ type Server struct {
 	status         *util.PushStatus
 
 	Username string
+
+	// Apply (benji2k2-Fork): gleicht die IP synchron ab; ist es gesetzt, antwortet der Push erst nach den Updates –
+	// 200 nur, wenn alle Einträge stimmen, sonst 502 (Cloudflare-Fehler) bzw. 504 (nicht rechtzeitig fertig).
+	// Ohne Apply wird die IP wie im Original nur an out übergeben.
+	Apply func(ip *net.IP) (ok bool, timedOut bool)
 	Password string
 }
 
@@ -35,6 +40,32 @@ func NewServer(out chan<- *net.IP, localIp *net.IP, log *slog.Logger, subsystem 
 		pushExecutions: pushExecutions,
 		status:         status,
 	}
+}
+
+// forward gibt die IP weiter und liefert den Statuscode für die Antwort (200, 502 oder 504).
+func (s *Server) forward(ip *net.IP) int {
+	if s.Apply == nil {
+		s.out <- ip
+		return http.StatusOK
+	}
+	ok, timedOut := s.Apply(ip)
+	switch {
+	case timedOut:
+		s.log.Warn("Cloudflare update not finished in time", slog.Any("ip", ip))
+		return http.StatusGatewayTimeout
+	case !ok:
+		s.log.Warn("Cloudflare update failed", slog.Any("ip", ip))
+		return http.StatusBadGateway
+	}
+	return http.StatusOK
+}
+
+// worse: schlechterer Statuscode für die Antwort (504 vor 502 vor 200)
+func worse(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // Handler offers a simple HTTP handler func for an HTTP server.
@@ -55,6 +86,7 @@ func (s *Server) Handler(w http.ResponseWriter, r *http.Request) {
 		timer.ObserveDuration()
 	}()
 	success := true
+	code := http.StatusOK
 	params := r.URL.Query()
 
 	defer func() {
@@ -85,7 +117,7 @@ func (s *Server) Handler(w http.ResponseWriter, r *http.Request) {
 		ipv4 := net.ParseIP(v4Str)
 		if ipv4 != nil && ipv4.To4() != nil {
 			s.log.Info("Forwarding update request for IPv4", slog.Any("ipv4", ipv4))
-			s.out <- &ipv4
+			code = worse(code, s.forward(&ipv4))
 		} else {
 			s.log.Warn("Failed to parse IPv4 address", slog.String("input", v4Str))
 			success = false
@@ -101,7 +133,7 @@ func (s *Server) Handler(w http.ResponseWriter, r *http.Request) {
 			ipv6 := net.ParseIP(v6Str)
 			if ipv6 != nil && ipv6.To4() == nil {
 				s.log.Info("Forwarding update request for IPv6", slog.Any("ipv6", ipv6))
-				s.out <- &ipv6
+				code = worse(code, s.forward(&ipv6))
 			} else {
 				s.log.Warn("Failed to parse IPv6 address", slog.String("input", v6Str))
 				success = false
@@ -138,15 +170,15 @@ func (s *Server) Handler(w http.ResponseWriter, r *http.Request) {
 				}
 
 				s.log.Info("Forwarding update request for IPv6", slog.Any("prefix", prefix), slog.Any("ipv6", constructedIp))
-				s.out <- &constructedIp
+				code = worse(code, s.forward(&constructedIp))
 			}
 		}
 	}
 
 	if success {
-		// 200 statt 202 (benji2k2-Fork): die FRITZ!Box meldet bei 202 „DynDNS-Fehler … Fehler 0“, mit 200 ohne Inhalt
-		// (wie bei klassischen Update-Skripten) nicht
-		w.WriteHeader(http.StatusOK)
+		// 200 statt 202 (benji2k2-Fork): die FRITZ!Box meldet bei 202 „DynDNS-Fehler … Fehler 0“; mit Apply erst nach den
+		// Updates und nur bei vollem Erfolg, sonst 502/504
+		w.WriteHeader(code)
 	} else {
 		w.WriteHeader(http.StatusBadRequest)
 	}
