@@ -271,7 +271,7 @@ func TestReihenfolge(t *testing.T) {
 	}
 	u := NewUpdater(slog.Default(), "test_reihenfolge")
 	// zwei Namen, damit ein Durchlauf mehrere Anfragen braucht
-	u.SetIPv4Zones("home.example.com,home.example.com")
+	u.SetIPv4Zones("home.example.com,www.example.com")
 	u.SetRecheckInterval(30 * time.Millisecond)
 	if err, _ := u.init(api); err != nil {
 		t.Fatal(err)
