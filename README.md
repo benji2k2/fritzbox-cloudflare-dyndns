@@ -2,7 +2,9 @@
 > Image: `ghcr.io/benji2k2/fritzbox-cloudflare-dyndns` (amd64), Version `v1.3.0-bk.<Baudatum>`. Änderungen:
 > - Jeder Push prüft die Einträge bei Cloudflare – keine zwischengespeicherte IP mehr. Fehlgeschlagene Updates und
 >   Änderungen von außen werden mit dem nächsten Push korrigiert; ein Teil-Fehler wird nicht mehr als Erfolg gemeldet.
-> - `/healthz` meldet je Eintrag zusätzlich `changed` (letzter Lauf hat geändert/angelegt).
+> - Nachprüfung: `CLOUDFLARE_RECHECK_INTERVAL` (z. B. `5m`, mindestens `1m`, Standard aus) gleicht die Einträge im
+>   Abstand mit der zuletzt gepushten IP ab – korrigiert gescheiterte Updates und Änderungen von außen ohne neuen Push.
+> - `/healthz` meldet je Eintrag zusätzlich `changed` und `lastChange`; Metrik `…_cf_updater_changes_total` je Eintrag.
 > - Healthcheck ohne Shell: `fritzbox-cloudflare-dyndns healthcheck` (fragt `/healthz` auf `METRICS_BIND`).
 > - Basis `distroless/static:nonroot`, Go immer aktuell; wöchentlicher Workflow aktualisiert die Module, prüft mit
 >   `govulncheck` und veröffentlicht nur bei Änderung.
