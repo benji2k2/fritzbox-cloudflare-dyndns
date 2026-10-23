@@ -5,6 +5,7 @@ name: ghcr-build
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", ".idea/**", ".editorconfig", "CONTRIBUTORS.md", "LICENSE"]
   schedule:
     - cron: "41 4 * * 1"
   workflow_dispatch:
@@ -69,7 +70,8 @@ jobs:
         run: |
           base=$(docker buildx imagetools inspect "$BASE" --format '{{json .Manifest}}' | jq -r .digest)
           gover=$(docker run --rm golang:1-alpine go version | awk '{print $3}')
-          tree=$(git rev-parse 'HEAD^{tree}')
+          # nur was ins Image geht – Doku-Änderungen sollen kein neues Image (und kein „Update“ in HA) auslösen
+          tree=$(git ls-tree -r HEAD -- Dockerfile main.go go.mod go.sum pkg | sha256sum | cut -c1-40)
           key=$(printf '%s %s %s' "$base" "$gover" "$tree" | sha256sum | cut -c1-16)
           alt=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Image}}' 2>/dev/null \
                 | jq -r '.config.Labels["bk.key"] // empty' || true)
