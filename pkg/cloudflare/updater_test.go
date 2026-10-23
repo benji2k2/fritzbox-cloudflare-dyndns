@@ -19,6 +19,7 @@ type mockCF struct {
 	mu        sync.Mutex
 	content   string
 	patches   int
+	lists     int
 	failPatch bool
 }
 
@@ -33,6 +34,7 @@ func (m *mockCF) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/zones":
 		fmt.Fprintf(w, `{"success":true,"errors":[],"messages":[],"result":[{"id":"z1","name":"example.com"}],%s}`, info)
 	case r.Method == http.MethodGet && r.URL.Path == "/zones/z1/dns_records":
+		m.lists++
 		fmt.Fprintf(w, `{"success":true,"errors":[],"messages":[],"result":[{"id":"r1","type":"A","name":"home.example.com","content":%q,"proxied":false,"ttl":60}],%s}`, m.content, info)
 	case (r.Method == http.MethodPatch || r.Method == http.MethodPut) && r.URL.Path == "/zones/z1/dns_records/r1":
 		if m.failPatch {
@@ -126,4 +128,77 @@ func TestJederPushPrueftCloudflare(t *testing.T) {
 	m.mu.Unlock()
 	push("198.51.100.7")
 	pruefe("Nachholen", "198.51.100.7", 3, true, true)
+}
+
+func (m *mockCF) setze(content string, failPatch bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.content, m.failPatch = content, failPatch
+}
+
+func warte(t *testing.T, was string, ok func() bool) {
+	t.Helper()
+	for ende := time.Now().Add(5 * time.Second); !ok(); {
+		if time.Now().After(ende) {
+			t.Fatalf("Zeitüberschreitung: %s", was)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestNachpruefung: Mit eingeschalteter Nachprüfung werden ein gescheitertes Update und eine Änderung von außen ohne
+// neuen Push korrigiert; ohne vorherigen Push prüft sie nichts.
+func TestNachpruefung(t *testing.T) {
+	m := &mockCF{content: "192.0.2.10"}
+	srv := httptest.NewServer(m)
+	defer srv.Close()
+
+	api, err := cf.NewWithAPIToken("test", cf.BaseURL(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := NewUpdater(slog.Default(), "test_nachpruefung")
+	u.SetIPv4Zones("home.example.com")
+	u.SetRecheckInterval(100 * time.Millisecond)
+	if err, _ := u.init(api); err != nil {
+		t.Fatal(err)
+	}
+	u.StartWorker()
+	st := u.actions[0].status
+
+	// ohne Push: keine Abfrage bei Cloudflare
+	time.Sleep(350 * time.Millisecond)
+	m.mu.Lock()
+	lists := m.lists
+	m.mu.Unlock()
+	if lists != 0 {
+		t.Fatal("Nachprüfung ohne vorherigen Push")
+	}
+
+	// Push, Update scheitert …
+	m.setze("192.0.2.10", true)
+	addr := net.ParseIP("198.51.100.7")
+	u.In <- &addr
+	warte(t, "Fehler gemeldet", func() bool { return !st.Last.IsZero() && !st.Succeeded })
+
+	// … und wird ohne neuen Push nachgeholt
+	m.setze("192.0.2.10", false)
+	warte(t, "Nachholen", func() bool { c, _ := m.stand(); return c == "198.51.100.7" && st.Succeeded })
+	if st.LastChange.IsZero() {
+		t.Fatal("LastChange nicht gesetzt")
+	}
+	erste := st.LastChange
+
+	// Änderung von außen wird zurückgesetzt
+	m.setze("192.0.2.1", false)
+	warte(t, "Änderung von außen korrigiert", func() bool { c, _ := m.stand(); return c == "198.51.100.7" })
+	warte(t, "LastChange fortgeschrieben", func() bool { return st.LastChange.After(erste) })
+
+	// stimmt alles, bleibt LastChange stehen und es wird nicht geschrieben
+	_, p := m.stand()
+	stand := st.LastChange
+	time.Sleep(350 * time.Millisecond)
+	if _, p2 := m.stand(); p2 != p || !st.LastChange.Equal(stand) {
+		t.Fatalf("Nachprüfung schreibt ohne Abweichung: patches %d → %d", p, p2)
+	}
 }

@@ -23,10 +23,12 @@ type PollStatus struct {
 }
 
 type UpdateStatus struct {
-	Last      time.Time `json:"last"`
-	Domain    string    `json:"domain"`
-	IpVersion uint8     `json:"ipVersion"`
-	Succeeded bool      `json:"succeeded"`
-	// Changed: der letzte erfolgreiche Lauf hat den Eintrag geändert oder angelegt (benji2k2-Fork)
-	Changed   bool      `json:"changed"`
+	Last       time.Time `json:"last"`
+	Domain     string    `json:"domain"`
+	IpVersion  uint8     `json:"ipVersion"`
+	Succeeded  bool      `json:"succeeded"`
+	// Changed: der letzte erfolgreiche Lauf hat den Eintrag geändert oder angelegt; LastChange: Zeitpunkt der letzten
+	// tatsächlichen Änderung (Push oder Nachprüfung) – benji2k2-Fork
+	Changed    bool      `json:"changed"`
+	LastChange time.Time `json:"lastChange"`
 }

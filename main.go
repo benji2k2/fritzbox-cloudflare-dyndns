@@ -128,6 +128,16 @@ func newUpdater(logger *slog.Logger) (*cloudflare.Updater, []*util.UpdateStatus)
 		os.Exit(1)
 	}
 
+	// Nachprüfung mit der zuletzt gepushten IP (benji2k2-Fork), z. B. CLOUDFLARE_RECHECK_INTERVAL=5m; mindestens 1m
+	if v := os.Getenv("CLOUDFLARE_RECHECK_INTERVAL"); v != "" {
+		d, perr := time.ParseDuration(v)
+		if perr != nil || d < time.Minute {
+			logger.Warn("Invalid CLOUDFLARE_RECHECK_INTERVAL (duration, at least 1m), recheck disabled", slog.String("value", v))
+		} else {
+			u.SetRecheckInterval(d)
+		}
+	}
+
 	return u, status
 }
 

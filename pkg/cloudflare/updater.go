@@ -20,6 +20,7 @@ type Action struct {
 	IpVersion uint8
 
 	updates prometheus.Summary
+	changes prometheus.Counter
 	status  *util.UpdateStatus
 }
 
@@ -37,6 +38,9 @@ type Updater struct {
 
 
 	subsystem string
+
+	// recheck: Abstand der Nachprüfung mit der zuletzt gepushten IP (0 = aus; benji2k2-Fork)
+	recheck time.Duration
 }
 
 func NewUpdater(log *slog.Logger, subsystem string) *Updater {
@@ -58,6 +62,21 @@ func (u Updater) makeSummary(labels prometheus.Labels) prometheus.Summary {
 		Objectives:  map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 		ConstLabels: labels,
 	})
+}
+
+func (u Updater) makeCounter(labels prometheus.Labels) prometheus.Counter {
+	return promauto.NewCounter(prometheus.CounterOpts{
+		Subsystem:   util.MakePromSubsystem(u.subsystem),
+		Name:        "changes_total",
+		Help:        "Tatsächliche Änderungen (oder Neuanlagen) des Eintrags bei Cloudflare",
+		ConstLabels: labels,
+	})
+}
+
+// SetRecheckInterval schaltet die Nachprüfung ein: Im Abstand d werden die Einträge mit der zuletzt gepushten IP
+// abgeglichen (gescheiterte Updates und Änderungen von außen werden so ohne neuen Push korrigiert).
+func (u *Updater) SetRecheckInterval(d time.Duration) {
+	u.recheck = d
 }
 
 func (u *Updater) SetIPv4Zones(zones string) {
@@ -131,6 +150,7 @@ func (u *Updater) init(api *cf.API) (error, []*util.UpdateStatus) {
 			CfZoneId:  zoneId,
 			IpVersion: 4,
 			updates:   updates,
+			changes:   u.makeCounter(labels),
 			status:    &status,
 		}
 
@@ -149,6 +169,7 @@ func (u *Updater) init(api *cf.API) (error, []*util.UpdateStatus) {
 			CfZoneId:  zoneId,
 			IpVersion: 6,
 			updates:   updates,
+			changes:   u.makeCounter(labels),
 			status:    &status,
 		}
 
@@ -171,27 +192,60 @@ func (u *Updater) StartWorker() {
 
 func (u *Updater) spawnWorker() {
 	// Bewusst kein Vergleich mit der zuletzt gesetzten IP: Jeder Push liest die Einträge bei Cloudflare und ändert nur
-	// abweichende. So heilen fehlgeschlagene Updates und Änderungen von außen mit dem nächsten Push (benji2k2-Fork).
-	for ip := range u.In {
-		u.log.Info("Received update request", slog.Any("ip", ip))
+	// abweichende. Die zuletzt gepushte IP dient nur der Nachprüfung, sie verhindert nie ein Update (benji2k2-Fork).
+	var lastV4, lastV6 *net.IP
 
-		for _, action := range u.actions {
-			// Nur Aktionen der passenden IP-Version
-			if (ip.To4() == nil) != (action.IpVersion == 6) {
-				continue
+	var tick <-chan time.Time
+	if u.recheck > 0 {
+		ticker := time.NewTicker(u.recheck)
+		defer ticker.Stop()
+		tick = ticker.C
+		u.log.Info("Recheck enabled", slog.Duration("interval", u.recheck))
+	}
+
+	for {
+		select {
+		case ip := <-u.In:
+			// sofort merken – auch wenn das Update gleich scheitert, holt die Nachprüfung es nach
+			if ip.To4() == nil {
+				lastV6 = ip
+			} else {
+				lastV4 = ip
 			}
-			u.runAction(action, ip)
+			u.log.Info("Received update request", slog.Any("ip", ip))
+			u.runAll(ip, false)
+		case <-tick:
+			if lastV4 != nil {
+				u.runAll(lastV4, true)
+			}
+			if lastV6 != nil {
+				u.runAll(lastV6, true)
+			}
 		}
 	}
 }
 
+func (u *Updater) runAll(ip *net.IP, recheck bool) {
+	for _, action := range u.actions {
+		// Nur Aktionen der passenden IP-Version
+		if (ip.To4() == nil) != (action.IpVersion == 6) {
+			continue
+		}
+		u.runAction(action, ip, recheck)
+	}
+}
+
 // runAction gleicht einen Eintrag mit der IP ab. Status und Dauer werden nur bei vollem Erfolg als erfolgreich
-// gemeldet; Changed sagt, ob tatsächlich etwas geändert oder angelegt wurde.
-func (u *Updater) runAction(action *Action, ip *net.IP) {
+// gemeldet; Changed sagt, ob tatsächlich etwas geändert oder angelegt wurde. Bei der Nachprüfung (recheck) wird nur
+// bei Änderung oder Fehler geloggt, und die Dauer-Metrik zählt weiter nur Durchläufe nach einem Push.
+func (u *Updater) runAction(action *Action, ip *net.IP, recheck bool) {
 	timer := prometheus.NewTimer(action.updates)
 
 	// Create detailed sub-logger for this action
 	alog := u.log.With(slog.String("domain", fmt.Sprintf("%s/IPv%d", action.DnsRecord, action.IpVersion)))
+	if recheck {
+		alog = alog.With(slog.Bool("recheck", true))
+	}
 
 	recordType := "A"
 	if ip.To4() == nil {
@@ -245,7 +299,9 @@ func (u *Updater) runAction(action *Action, ip *net.IP) {
 	// Update existing records
 	for _, record := range records {
 		if record.Content == ip.String() {
-			alog.Info("DNS record already up to date", slog.Any("record-id", record.ID))
+			if !recheck {
+				alog.Info("DNS record already up to date", slog.Any("record-id", record.ID))
+			}
 			continue
 		}
 
@@ -266,9 +322,16 @@ func (u *Updater) runAction(action *Action, ip *net.IP) {
 		changed = true
 	}
 
-	action.status.Last = time.Now()
+	now := time.Now()
+	action.status.Last = now
 	action.status.Succeeded = true
 	action.status.Changed = changed
+	if changed {
+		action.status.LastChange = now
+		action.changes.Inc()
+	}
 
-	timer.ObserveDuration()
+	if !recheck {
+		timer.ObserveDuration()
+	}
 }
