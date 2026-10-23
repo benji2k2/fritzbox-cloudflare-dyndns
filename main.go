@@ -63,7 +63,7 @@ func main() {
 	}
 
 	// Create a OS signal shutdown channel
-	shutdown := make(chan os.Signal)
+	shutdown := make(chan os.Signal, 1)
 
 	signal.Notify(shutdown, syscall.SIGTERM)
 	signal.Notify(shutdown, syscall.SIGINT)
