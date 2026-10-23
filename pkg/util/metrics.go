@@ -27,4 +27,6 @@ type UpdateStatus struct {
 	Domain    string    `json:"domain"`
 	IpVersion uint8     `json:"ipVersion"`
 	Succeeded bool      `json:"succeeded"`
+	// Changed: der letzte erfolgreiche Lauf hat den Eintrag geändert oder angelegt (benji2k2-Fork)
+	Changed   bool      `json:"changed"`
 }

@@ -1,0 +1,158 @@
+name: ghcr-build
+
+# benji2k2-Fork: Go-Module, Go-Version und Basis-Image wöchentlich prüfen; ein neues Image gibt es nur, wenn sich etwas
+# davon (oder der Quellcode) geändert hat – sonst meldet Watchtower jede Woche ein „Update“ ohne Inhalt.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      erzwingen:
+        description: "Image auch ohne Änderung neu veröffentlichen"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: ghcr-build
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/benji2k2/fritzbox-cloudflare-dyndns
+  BASE: gcr.io/distroless/static:nonroot
+  UPSTREAM_VERSION: v1.3.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Go-Module aktualisieren
+        run: |
+          go get -u ./...
+          go mod tidy
+          git diff --stat -- go.mod go.sum
+
+      - name: Prüfen, testen, bauen
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go vet ./...
+          go test ./...
+          go build -o /tmp/dyndns .
+
+      - name: govulncheck (nur tatsächlich aufgerufene Funktionen)
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Modul-Updates committen
+        run: |
+          if ! git diff --quiet -- go.mod go.sum; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "deps: Go-Module aktualisiert ($(date -u +%Y-%m-%d))" -- go.mod go.sum
+            git push
+          fi
+
+      - name: Änderungsschlüssel bestimmen
+        id: key
+        run: |
+          base=$(docker buildx imagetools inspect "$BASE" --format '{{json .Manifest}}' | jq -r .digest)
+          gover=$(docker run --rm golang:1-alpine go version | awk '{print $3}')
+          tree=$(git rev-parse 'HEAD^{tree}')
+          key=$(printf '%s %s %s' "$base" "$gover" "$tree" | sha256sum | cut -c1-16)
+          alt=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Image}}' 2>/dev/null \
+                | jq -r '.config.Labels["bk.key"] // empty' || true)
+          {
+            echo "key=$key"
+            echo "alt=$alt"
+            echo "rev=$(git rev-parse HEAD)"
+            echo "short=$(git rev-parse --short=12 HEAD)"
+            echo "version=${UPSTREAM_VERSION}-bk.$(date -u +%Y%m%d)"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Basis $base · $gover · Baum $tree → Schlüssel $key (bisher: ${alt:-keins})" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Entscheiden
+        id: neu
+        run: |
+          if [ "${{ steps.key.outputs.key }}" != "${{ steps.key.outputs.alt }}" ] || [ "${{ inputs.erzwingen }}" = "true" ]; then
+            echo "bauen=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bauen=false" >> "$GITHUB_OUTPUT"
+            echo "Keine Änderung – kein neues Image." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.neu.outputs.bauen == 'true'
+
+      - name: Image bauen (lokal, für den Test)
+        if: steps.neu.outputs.bauen == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          pull: true
+          no-cache: true
+          load: true
+          tags: dyndns:test
+          labels: |
+            org.opencontainers.image.title=fritzbox-cloudflare-dyndns
+            org.opencontainers.image.version=${{ steps.key.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.key.outputs.rev }}
+            org.opencontainers.image.created=${{ steps.key.outputs.created }}
+            org.opencontainers.image.source=https://github.com/benji2k2/fritzbox-cloudflare-dyndns
+            org.opencontainers.image.url=https://github.com/benji2k2/fritzbox-cloudflare-dyndns
+            org.opencontainers.image.licenses=MIT
+            bk.key=${{ steps.key.outputs.key }}
+
+      - name: Test im Container
+        if: steps.neu.outputs.bauen == 'true'
+        run: |
+          set -eu
+          code() { curl -s -o /dev/null -w '%{http_code}' "$1"; }
+          docker run -d --name t -u 2008:2008 --read-only --cap-drop ALL --security-opt no-new-privileges \
+            -e DYNDNS_SERVER_BIND=:8080 -e DYNDNS_SERVER_USERNAME=fritzbox -e DYNDNS_SERVER_PASSWORD=probe \
+            -e FRITZBOX_ENDPOINT_URL= -e METRICS_BIND=:9876 -p 18080:8080 -p 19876:9876 dyndns:test
+          sleep 3
+          docker logs t
+          test "$(docker inspect -f '{{.State.Running}}' t)" = true
+          test "$(code http://127.0.0.1:19876/liveness)" = 204
+          test "$(code 'http://127.0.0.1:18080/ip?v4=192.0.2.1&username=fritzbox&password=falsch')" = 401
+          test "$(code http://127.0.0.1:19876/healthz)" = 503
+          if docker exec t /app/fritzbox-cloudflare-dyndns healthcheck; then echo "healthcheck hätte scheitern müssen"; exit 1; fi
+          test "$(code 'http://127.0.0.1:18080/ip?v4=192.0.2.1&username=fritzbox&password=probe')" = 202
+          test "$(code http://127.0.0.1:19876/healthz)" = 200
+          docker exec t /app/fritzbox-cloudflare-dyndns healthcheck
+          case "$(docker image inspect -f '{{.Config.User}}' dyndns:test)" in 65532|65532:65532|nonroot|nonroot:nonroot) ;; *) echo "Image läuft nicht als nonroot"; exit 1;; esac
+          test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' dyndns:test)" = "${{ steps.key.outputs.version }}"
+          if docker exec t /busybox/sh -c true 2>/dev/null; then echo "Shell im Image"; exit 1; fi
+          docker rm -f t
+
+      - name: Anmelden bei ghcr.io
+        if: steps.neu.outputs.bauen == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Veröffentlichen (genau das getestete Image)
+        if: steps.neu.outputs.bauen == 'true'
+        run: |
+          set -eu
+          for tag in latest "${{ steps.key.outputs.short }}" "${{ steps.key.outputs.version }}"; do
+            docker tag dyndns:test "$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
+          done
+          echo "Veröffentlicht: $IMAGE:${{ steps.key.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"

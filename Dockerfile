@@ -1,4 +1,6 @@
-FROM golang:1.23-alpine AS server_build
+# benji2k2-Fork: immer das aktuelle Go 1.x; Endstufe distroless/static:nonroot (keine Shell, aktuelle CA-Zertifikate).
+# Healthcheck ohne Shell: ["CMD", "/app/fritzbox-cloudflare-dyndns", "healthcheck"] (braucht METRICS_BIND).
+FROM golang:1-alpine AS server_build
 
 WORKDIR /appbuild
 
@@ -8,10 +10,10 @@ COPY go.mod go.sum /appbuild/
 
 COPY ./ /appbuild
 
-RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/root/go/pkg/mod CGO_ENABLED=0 GOOS=linux go build -o fritzbox-cloudflare-dyndns
+RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/root/go/pkg/mod CGO_ENABLED=0 GOOS=linux go build -trimpath -o fritzbox-cloudflare-dyndns
 
 # Build deployable server
-FROM gcr.io/distroless/static:debug
+FROM gcr.io/distroless/static:nonroot
 
 ENV FRITZBOX_ENDPOINT_URL="http://fritz.box:49000" \
     FRITZBOX_ENDPOINT_TIMEOUT="30s" \

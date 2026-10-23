@@ -13,13 +13,20 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func main() {
+	// Healthcheck für Images ohne Shell (benji2k2-Fork): fritzbox-cloudflare-dyndns healthcheck
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(healthcheck())
+	}
+
 	// Load any env variables defined in .env.dev files
 	_ = godotenv.Load(".env", ".env.dev")
 
@@ -237,4 +244,35 @@ func readSecret(envName string) string {
 		}
 	}
 	return secret
+}
+
+// healthcheck fragt /healthz des eigenen Metrik-Servers ab: 0 bei HTTP 200, sonst 1 (503 = letzter Push/Update gescheitert).
+func healthcheck() int {
+	host, port, err := net.SplitHostPort(os.Getenv("METRICS_BIND"))
+	if err != nil {
+		slog.Error("healthcheck: METRICS_BIND fehlt oder ist ungültig", util.ErrorAttr(err))
+		return 1
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+
+	ziel := "http://" + net.JoinHostPort(host, port) + "/healthz"
+	if token := readSecret("METRICS_TOKEN"); token != "" {
+		ziel += "?token=" + url.QueryEscape(token)
+	}
+
+	client := http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(ziel)
+	if err != nil {
+		slog.Error("healthcheck: keine Antwort", util.ErrorAttr(err))
+		return 1
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("healthcheck: unerwarteter Status", slog.Int("status", resp.StatusCode))
+		return 1
+	}
+	return 0
 }

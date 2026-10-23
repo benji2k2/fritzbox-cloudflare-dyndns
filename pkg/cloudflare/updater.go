@@ -35,8 +35,6 @@ type Updater struct {
 
 	In chan *net.IP
 
-	lastIpv4 *net.IP
-	lastIpv6 *net.IP
 
 	subsystem string
 }
@@ -172,124 +170,105 @@ func (u *Updater) StartWorker() {
 }
 
 func (u *Updater) spawnWorker() {
-	for {
-		select {
-		case ip := <-u.In:
-			if ip.To4() == nil {
-				if u.lastIpv6 != nil && u.lastIpv6.Equal(*ip) {
-					continue
-				}
-			} else {
-				if u.lastIpv4 != nil && u.lastIpv4.Equal(*ip) {
-					continue
-				}
+	// Bewusst kein Vergleich mit der zuletzt gesetzten IP: Jeder Push liest die Einträge bei Cloudflare und ändert nur
+	// abweichende. So heilen fehlgeschlagene Updates und Änderungen von außen mit dem nächsten Push (benji2k2-Fork).
+	for ip := range u.In {
+		u.log.Info("Received update request", slog.Any("ip", ip))
+
+		for _, action := range u.actions {
+			// Nur Aktionen der passenden IP-Version
+			if (ip.To4() == nil) != (action.IpVersion == 6) {
+				continue
 			}
-			u.log.Info("Received update request", slog.Any("ip", ip))
-
-			for _, action := range u.actions {
-				timer := prometheus.NewTimer(action.updates)
-
-				// Skip IPv6 action mismatching IP version
-				if ip.To4() == nil && action.IpVersion != 6 {
-					continue
-				}
-
-				// Skip IPv4 action mismatching IP version
-				if ip.To4() != nil && action.IpVersion == 6 {
-					continue
-				}
-
-				// Create detailed sub-logger for this action
-				alog := u.log.With(slog.String("domain", fmt.Sprintf("%s/IPv%d", action.DnsRecord, action.IpVersion)))
-
-				// Decide record type on ip version
-				var recordType string
-
-				if ip.To4() == nil {
-					recordType = "AAAA"
-				} else {
-					recordType = "A"
-				}
-
-				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-
-				rc := cf.ZoneIdentifier(action.CfZoneId)
-
-				// Research all current records matching the current scheme
-				records, _, err := u.api.ListDNSRecords(ctx, rc, cf.ListDNSRecordsParams{
-					Type: recordType,
-					Name: action.DnsRecord,
-				})
-
-				if err != nil {
-					alog.Error("Action failed, could not research DNS records", util.ErrorAttr(err))
-					action.status.Last = time.Now()
-					action.status.Succeeded = false
-					continue
-				}
-
-				// Create record if none were found
-				if len(records) == 0 {
-					alog.Info("Creating DNS record")
-
-					proxied := false
-
-					_, err := u.api.CreateDNSRecord(ctx, rc, cf.CreateDNSRecordParams{
-						Type:    recordType,
-						Name:    action.DnsRecord,
-						Content: ip.String(),
-						Proxied: &proxied,
-						TTL:     120,
-					})
-
-					if err != nil {
-						alog.Error("Action failed, could not create DNS record", util.ErrorAttr(err))
-						action.status.Last = time.Now()
-						action.status.Succeeded = false
-						continue
-					}
-				}
-
-				// Update existing records
-				for _, record := range records {
-					alog.Info("Updating DNS record", slog.Any("record-id", record.ID))
-
-					if record.Content == ip.String() {
-						action.status.Last = time.Now()
-						action.status.Succeeded = true
-						continue
-					}
-
-					// Ensure we submit all required fields even if they did not change,otherwise
-					// cloudflare-go might revert them to default values.
-					_, err := u.api.UpdateDNSRecord(ctx, rc, cf.UpdateDNSRecordParams{
-						ID:      record.ID,
-						Content: ip.String(),
-						TTL:     record.TTL,
-						Proxied: record.Proxied,
-					})
-
-					if err != nil {
-						alog.Error("Action failed, could not update DNS record", util.ErrorAttr(err))
-						action.status.Last = time.Now()
-						action.status.Succeeded = false
-						continue
-					}
-				}
-
-				cancel()
-
-				action.status.Last = time.Now()
-				action.status.Succeeded = true
-
-				timer.ObserveDuration()
-			}
-
-			if ip.To4() == nil {
-				u.lastIpv6 = ip
-			} else {
-				u.lastIpv4 = ip
-			}
+			u.runAction(action, ip)
 		}
 	}
+}
+
+// runAction gleicht einen Eintrag mit der IP ab. Status und Dauer werden nur bei vollem Erfolg als erfolgreich
+// gemeldet; Changed sagt, ob tatsächlich etwas geändert oder angelegt wurde.
+func (u *Updater) runAction(action *Action, ip *net.IP) {
+	timer := prometheus.NewTimer(action.updates)
+
+	// Create detailed sub-logger for this action
+	alog := u.log.With(slog.String("domain", fmt.Sprintf("%s/IPv%d", action.DnsRecord, action.IpVersion)))
+
+	recordType := "A"
+	if ip.To4() == nil {
+		recordType = "AAAA"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	fail := func(msg string, err error) {
+		alog.Error(msg, util.ErrorAttr(err))
+		action.status.Last = time.Now()
+		action.status.Succeeded = false
+		action.status.Changed = false
+	}
+
+	rc := cf.ZoneIdentifier(action.CfZoneId)
+
+	// Research all current records matching the current scheme
+	records, _, err := u.api.ListDNSRecords(ctx, rc, cf.ListDNSRecordsParams{
+		Type: recordType,
+		Name: action.DnsRecord,
+	})
+	if err != nil {
+		fail("Action failed, could not research DNS records", err)
+		return
+	}
+
+	changed := false
+
+	// Create record if none were found
+	if len(records) == 0 {
+		alog.Info("Creating DNS record")
+
+		proxied := false
+
+		_, err := u.api.CreateDNSRecord(ctx, rc, cf.CreateDNSRecordParams{
+			Type:    recordType,
+			Name:    action.DnsRecord,
+			Content: ip.String(),
+			Proxied: &proxied,
+			TTL:     120,
+		})
+		if err != nil {
+			fail("Action failed, could not create DNS record", err)
+			return
+		}
+		changed = true
+	}
+
+	// Update existing records
+	for _, record := range records {
+		if record.Content == ip.String() {
+			alog.Info("DNS record already up to date", slog.Any("record-id", record.ID))
+			continue
+		}
+
+		alog.Info("Updating DNS record", slog.Any("record-id", record.ID), slog.String("old", record.Content))
+
+		// Ensure we submit all required fields even if they did not change,otherwise
+		// cloudflare-go might revert them to default values.
+		_, err := u.api.UpdateDNSRecord(ctx, rc, cf.UpdateDNSRecordParams{
+			ID:      record.ID,
+			Content: ip.String(),
+			TTL:     record.TTL,
+			Proxied: record.Proxied,
+		})
+		if err != nil {
+			fail("Action failed, could not update DNS record", err)
+			return
+		}
+		changed = true
+	}
+
+	action.status.Last = time.Now()
+	action.status.Succeeded = true
+	action.status.Changed = changed
+
+	timer.ObserveDuration()
 }

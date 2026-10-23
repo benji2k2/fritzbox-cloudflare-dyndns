@@ -1,3 +1,12 @@
+> **Fork von [cromefire/fritzbox-cloudflare-dyndns](https://github.com/cromefire/fritzbox-cloudflare-dyndns)** (upstream seit 10/2024 ruhend).
+> Image: `ghcr.io/benji2k2/fritzbox-cloudflare-dyndns` (amd64), Version `v1.3.0-bk.<Baudatum>`. Änderungen:
+> - Jeder Push prüft die Einträge bei Cloudflare – keine zwischengespeicherte IP mehr. Fehlgeschlagene Updates und
+>   Änderungen von außen werden mit dem nächsten Push korrigiert; ein Teil-Fehler wird nicht mehr als Erfolg gemeldet.
+> - `/healthz` meldet je Eintrag zusätzlich `changed` (letzter Lauf hat geändert/angelegt).
+> - Healthcheck ohne Shell: `fritzbox-cloudflare-dyndns healthcheck` (fragt `/healthz` auf `METRICS_BIND`).
+> - Basis `distroless/static:nonroot`, Go immer aktuell; wöchentlicher Workflow aktualisiert die Module, prüft mit
+>   `govulncheck` und veröffentlicht nur bei Änderung.
+
 # AVM FRITZ!Box Cloudflare DNS-service
 
 This project has some simple goals:
