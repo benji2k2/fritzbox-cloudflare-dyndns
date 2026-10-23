@@ -144,7 +144,9 @@ func (s *Server) Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if success {
-		w.WriteHeader(http.StatusAccepted)
+		// 200 statt 202 (benji2k2-Fork): die FRITZ!Box meldet bei 202 „DynDNS-Fehler … Fehler 0“, mit 200 ohne Inhalt
+		// (wie bei klassischen Update-Skripten) nicht
+		w.WriteHeader(http.StatusOK)
 	} else {
 		w.WriteHeader(http.StatusBadRequest)
 	}

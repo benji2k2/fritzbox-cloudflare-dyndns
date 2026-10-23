@@ -5,6 +5,7 @@
 > - Nachprüfung: `CLOUDFLARE_RECHECK_INTERVAL` (z. B. `5m`, mindestens `1m`, Standard aus) gleicht die Einträge im
 >   Abstand mit der zuletzt gepushten IP ab – korrigiert gescheiterte Updates und Änderungen von außen ohne neuen Push.
 > - `/healthz` meldet je Eintrag zusätzlich `changed` und `lastChange`; Metrik `…_cf_updater_changes_total` je Eintrag.
+> - Erfolgreicher Push antwortet mit **200** statt 202 (die FRITZ!Box meldet sonst „DynDNS-Fehler … Fehler 0“).
 > - Healthcheck ohne Shell: `fritzbox-cloudflare-dyndns healthcheck` (fragt `/healthz` auf `METRICS_BIND`).
 > - Basis `distroless/static:nonroot`, Go immer aktuell; wöchentlicher Workflow aktualisiert die Module, prüft mit
 >   `govulncheck` und veröffentlicht nur bei Änderung.

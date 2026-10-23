@@ -133,7 +133,7 @@ jobs:
           test "$(code 'http://127.0.0.1:18080/ip?v4=192.0.2.1&username=fritzbox&password=falsch')" = 401
           test "$(code http://127.0.0.1:19876/healthz)" = 503
           if docker exec dyndns-probe /app/fritzbox-cloudflare-dyndns healthcheck; then echo "healthcheck hätte scheitern müssen"; exit 1; fi
-          test "$(code 'http://127.0.0.1:18080/ip?v4=192.0.2.1&username=fritzbox&password=probe')" = 202
+          test "$(code 'http://127.0.0.1:18080/ip?v4=192.0.2.1&username=fritzbox&password=probe')" = 200
           test "$(code http://127.0.0.1:19876/healthz)" = 200
           docker exec dyndns-probe /app/fritzbox-cloudflare-dyndns healthcheck
           case "$(docker image inspect -f '{{.Config.User}}' dyndns:test)" in 65532|65532:65532|nonroot|nonroot:nonroot) ;; *) echo "Image läuft nicht als nonroot"; exit 1;; esac
