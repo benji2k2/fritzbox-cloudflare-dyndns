@@ -80,7 +80,7 @@ jobs:
             echo "alt=$alt"
             echo "rev=$(git rev-parse HEAD)"
             echo "short=$(git rev-parse --short=12 HEAD)"
-            echo "version=${UPSTREAM_VERSION}-bk.$(date -u +%Y%m%d)"
+            echo "version=${UPSTREAM_VERSION}-$(date -u +%Y%m%d)"
             echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
           echo "Basis $base · $gover · Baum $tree → Schlüssel $key (bisher: ${alt:-keins})" >> "$GITHUB_STEP_SUMMARY"
